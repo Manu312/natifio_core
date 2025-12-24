@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  PROFESOR
+  ALUMNO
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  roles     Role[]   @default([ALUMNO])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacher   Teacher?
+  bookings  Booking[]
+}
+
+model Teacher {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id])
+  firstName   String
+  lastName    String
+  bio         String?
+  maxCapacity Int      @default(1)
+  
+  subjects    Subject[]
+  availability Availability[]
+  bookings    Booking[]
+}
+
+model Subject {
+  id        String   @id @default(uuid())
+  name      String
+  level     String
+  
+  teachers  Teacher[]
+}
+
+model Availability {
+  id        String   @id @default(uuid())
+  teacherId String
+  teacher   Teacher  @relation(fields: [teacherId], references: [id])
+  dayOfWeek Int      // 0-6 (Sunday-Saturday) or 1-7 (Monday-Sunday) - Let's use 0=Sunday
+  startTime String   // "HH:mm"
+  endTime   String   // "HH:mm"
+}
+
+model Booking {
+  id        String   @id @default(uuid())
+  studentId String
+  student   User     @relation(fields: [studentId], references: [id])
+  teacherId String
+  teacher   Teacher  @relation(fields: [teacherId], references: [id])
+  date      DateTime
+  startTime String
+  endTime   String
+  status    String   @default("CONFIRMED") // PENDING, CONFIRMED, CANCELLED
+  
+  createdAt DateTime @default(now())
+}
