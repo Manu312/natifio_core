@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsInt, Min } from 'class-validator';
+import { IsString, IsOptional, IsInt, Min, IsArray, IsUUID } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateTeacherDto {
@@ -23,6 +23,17 @@ export class CreateTeacherDto {
   @ApiProperty()
   @IsString()
   userId: string; // Link to User
+
+  @ApiProperty({ 
+    required: false, 
+    type: [String],
+    description: 'Array of subject IDs that this teacher can teach',
+    example: ['uuid-1', 'uuid-2']
+  })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  @IsOptional()
+  subjectIds?: string[];
 }
 
 export class UpdateTeacherDto {
@@ -46,4 +57,15 @@ export class UpdateTeacherDto {
   @Min(1)
   @IsOptional()
   maxCapacity?: number;
+
+  @ApiProperty({ 
+    required: false, 
+    type: [String],
+    description: 'Array of subject IDs that this teacher can teach',
+    example: ['uuid-1', 'uuid-2']
+  })
+  @IsArray()
+  @IsUUID('4', { each: true })
+  @IsOptional()
+  subjectIds?: string[];
 }

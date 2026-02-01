@@ -1,18 +1,33 @@
 import { Injectable, BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Role } from '../auth/dto/auth.dto';
-import { CreateBookingDto } from './dto/create-booking.dto';
+import { CreateBookingDto, UpdateBookingDto } from './dto/create-booking.dto';
 
 @Injectable()
 export class BookingsService {
     constructor(private prisma: PrismaService) { }
 
     async create(createBookingDto: CreateBookingDto) {
-        const { teacherId, studentId, date, startTime, endTime } = createBookingDto;
+        const { teacherId, studentId: inputStudentId, date, startTime, endTime } = createBookingDto;
 
         // 1. Check Teacher Exists
         const teacher = await this.prisma.teacher.findUnique({ where: { id: teacherId } });
         if (!teacher) throw new BadRequestException('Teacher not found');
+
+        // 1.5. Resolve Student - acepta studentId O userId
+        let student = await this.prisma.student.findUnique({ where: { id: inputStudentId } });
+        
+        // Si no encuentra por studentId, buscar por userId
+        if (!student) {
+            student = await this.prisma.student.findUnique({ where: { userId: inputStudentId } });
+        }
+        
+        if (!student) {
+            throw new BadRequestException('Student not found. Provide a valid Student ID or User ID.');
+        }
+
+        // Usar el studentId real (de la tabla Student)
+        const studentId = student.id;
 
         // 2. Validate Time Range
         this.validateTimeRange(startTime, endTime);
@@ -79,11 +94,14 @@ export class BookingsService {
             throw new BadRequestException('Teacher is fully booked for this time slot');
         }
 
-        // 7. Create Booking
+        // 7. Create Booking (usar studentId resuelto, no el del DTO)
         return this.prisma.booking.create({
             data: {
-                ...createBookingDto,
+                teacherId,
+                studentId, // Este es el ID real de Student (resuelto arriba)
                 date: bookingDate,
+                startTime,
+                endTime,
             },
             include: {
                 teacher: {
@@ -94,39 +112,60 @@ export class BookingsService {
                     },
                 },
                 student: {
-                    select: {
-                        id: true,
-                        email: true,
-                    },
+                    include: { user: true }
                 },
             },
         });
     }
 
     async findAll(userId: string, roles: Role[]) {
+        // ADMIN ve todas las reservas
         if (roles.includes(Role.ADMIN)) {
             return this.prisma.booking.findMany({
-                include: { teacher: true, student: true },
+                include: { 
+                    teacher: true, 
+                    student: {
+                        include: { user: true }
+                    }
+                },
                 orderBy: { date: 'desc' },
             });
         }
 
+        // Construir filtro OR para múltiples roles
+        const orConditions: any[] = [];
+
+        // Si es ALUMNO, buscar su studentId a partir del userId
+        if (roles.includes(Role.ALUMNO)) {
+            const student = await this.prisma.student.findUnique({ where: { userId } });
+            if (student) {
+                orConditions.push({ studentId: student.id });
+            }
+        }
+
+        // Si es PROFESOR, agregar condición para ver sus reservas como profesor
         if (roles.includes(Role.PROFESOR)) {
-            // Find teacher profile for this user
             const teacher = await this.prisma.teacher.findUnique({ where: { userId } });
-            if (!teacher) return []; // Or throw error
-
-            return this.prisma.booking.findMany({
-                where: { teacherId: teacher.id },
-                include: { teacher: true, student: true },
-                orderBy: { date: 'desc' },
-            });
+            if (teacher) {
+                orConditions.push({ teacherId: teacher.id });
+            }
         }
 
-        // Default: ALUMNO
+        // Si no hay condiciones (usuario sin rol válido), retornar vacío
+        if (orConditions.length === 0) {
+            return [];
+        }
+
         return this.prisma.booking.findMany({
-            where: { studentId: userId },
-            include: { teacher: true, student: true },
+            where: {
+                OR: orConditions,
+            },
+            include: { 
+                teacher: true, 
+                student: {
+                    include: { user: true }
+                }
+            },
             orderBy: { date: 'desc' },
         });
     }
@@ -134,23 +173,158 @@ export class BookingsService {
     findOne(id: string) {
         return this.prisma.booking.findUnique({
             where: { id },
-            include: { teacher: true, student: true },
+            include: { 
+                teacher: true, 
+                student: {
+                    include: { user: true }
+                }
+            },
         });
     }
 
     async remove(id: string, userId: string, roles: Role[]) {
-        const booking = await this.prisma.booking.findUnique({ where: { id } });
+        const booking = await this.prisma.booking.findUnique({ 
+            where: { id },
+            include: { student: true }
+        });
         if (!booking) throw new NotFoundException('Booking not found');
 
         if (roles.includes(Role.ADMIN)) {
             return this.prisma.booking.delete({ where: { id } });
         }
 
-        if (booking.studentId !== userId) {
+        // Ahora comparamos con el userId del Student, no directamente con studentId
+        if (booking.student.userId !== userId) {
             throw new ForbiddenException('You can only delete your own bookings');
         }
 
         return this.prisma.booking.delete({ where: { id } });
+    }
+
+    async confirm(id: string) {
+        const booking = await this.prisma.booking.findUnique({ where: { id } });
+        if (!booking) throw new NotFoundException('Booking not found');
+
+        if (booking.confirmed) {
+            throw new BadRequestException('Booking is already confirmed');
+        }
+
+        return this.prisma.booking.update({
+            where: { id },
+            data: {
+                confirmed: true,
+                status: 'CONFIRMED',
+            },
+            include: { 
+                teacher: true, 
+                student: { include: { user: true } }
+            },
+        });
+    }
+
+    async update(id: string, updateBookingDto: UpdateBookingDto) {
+        // 1. Check if booking exists
+        const booking = await this.prisma.booking.findUnique({ where: { id } });
+        if (!booking) throw new NotFoundException('Booking not found');
+
+        // 2. Determine final values (use existing if not provided)
+        const teacherId = updateBookingDto.teacherId || booking.teacherId;
+        const date = updateBookingDto.date ? new Date(updateBookingDto.date) : booking.date;
+        const startTime = updateBookingDto.startTime || booking.startTime;
+        const endTime = updateBookingDto.endTime || booking.endTime;
+
+        // 3. If teacher is changing, verify new teacher exists
+        if (updateBookingDto.teacherId) {
+            const newTeacher = await this.prisma.teacher.findUnique({ 
+                where: { id: updateBookingDto.teacherId } 
+            });
+            if (!newTeacher) throw new BadRequestException('New teacher not found');
+        }
+
+        // 4. Validate time range
+        this.validateTimeRange(startTime, endTime);
+
+        // 5. Get day of week from date
+        const dayOfWeek = date.getDay();
+
+        // 6. Check if booking is within available time slots of the (new) teacher
+        const availableSlots = await this.prisma.availability.findMany({
+            where: {
+                teacherId,
+                dayOfWeek,
+            },
+        });
+
+        if (availableSlots.length === 0) {
+            throw new BadRequestException(
+                `Teacher is not available on ${this.getDayName(dayOfWeek)}s`
+            );
+        }
+
+        const isWithinAvailableSlot = availableSlots.some(slot =>
+            this.isTimeWithinRange(startTime, endTime, slot.startTime, slot.endTime)
+        );
+
+        if (!isWithinAvailableSlot) {
+            throw new BadRequestException(
+                `Booking time must be within teacher's available slots. Available: ${availableSlots.map(s => `${s.startTime}-${s.endTime}`).join(', ')}`
+            );
+        }
+
+        // 7. Check for overlapping bookings (excluding current booking)
+        const overlappingBookings = await this.prisma.booking.findMany({
+            where: {
+                teacherId,
+                date,
+                status: { in: ['CONFIRMED', 'PENDING'] },
+                id: { not: id }, // Exclude current booking
+            },
+        });
+
+        const hasOverlap = overlappingBookings.some(b =>
+            this.doTimesOverlap(startTime, endTime, b.startTime, b.endTime)
+        );
+
+        if (hasOverlap) {
+            throw new BadRequestException(
+                'This time slot overlaps with an existing booking'
+            );
+        }
+
+        // 8. Check teacher capacity (excluding current booking)
+        const teacher = await this.prisma.teacher.findUnique({ where: { id: teacherId } });
+        const concurrentBookings = await this.prisma.booking.count({
+            where: {
+                teacherId,
+                date,
+                startTime,
+                endTime,
+                status: { in: ['CONFIRMED', 'PENDING'] },
+                id: { not: id }, // Exclude current booking
+            },
+        });
+
+        if (concurrentBookings >= teacher!.maxCapacity) {
+            throw new BadRequestException('Teacher is fully booked for this time slot');
+        }
+
+        // 9. Update booking
+        return this.prisma.booking.update({
+            where: { id },
+            data: {
+                teacherId,
+                date,
+                startTime,
+                endTime,
+                // Reset confirmation if teacher or time changed
+                confirmed: false,
+                status: 'PENDING',
+            },
+            include: { 
+                teacher: true, 
+                student: { include: { user: true } }
+            },
+        });
     }
 
     // Helper Methods

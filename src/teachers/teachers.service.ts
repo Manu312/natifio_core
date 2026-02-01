@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTeacherDto, UpdateTeacherDto } from './dto/create-teacher.dto';
 
@@ -6,9 +6,17 @@ import { CreateTeacherDto, UpdateTeacherDto } from './dto/create-teacher.dto';
 export class TeachersService {
     constructor(private prisma: PrismaService) { }
 
-    create(createTeacherDto: CreateTeacherDto) {
+    async create(createTeacherDto: CreateTeacherDto) {
+        const { subjectIds, ...teacherData } = createTeacherDto;
+
         return this.prisma.teacher.create({
-            data: createTeacherDto,
+            data: {
+                ...teacherData,
+                subjects: subjectIds?.length ? {
+                    connect: subjectIds.map(id => ({ id }))
+                } : undefined,
+            },
+            include: { subjects: true },
         });
     }
 
@@ -25,10 +33,25 @@ export class TeachersService {
         });
     }
 
-    update(id: string, updateTeacherDto: UpdateTeacherDto) {
+    async update(id: string, updateTeacherDto: UpdateTeacherDto) {
+        const { subjectIds, ...teacherData } = updateTeacherDto;
+
+        // Check if teacher exists
+        const teacher = await this.prisma.teacher.findUnique({ where: { id } });
+        if (!teacher) {
+            throw new NotFoundException('Teacher not found');
+        }
+
         return this.prisma.teacher.update({
             where: { id },
-            data: updateTeacherDto,
+            data: {
+                ...teacherData,
+                // Si se envían subjectIds, reemplaza todos los subjects
+                subjects: subjectIds !== undefined ? {
+                    set: subjectIds.map(id => ({ id }))
+                } : undefined,
+            },
+            include: { subjects: true },
         });
     }
 

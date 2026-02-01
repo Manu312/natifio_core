@@ -23,7 +23,32 @@ model User {
   updatedAt DateTime @updatedAt
 
   teacher   Teacher?
-  bookings  Booking[]
+  student   Student?
+}
+
+model Student {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id])
+  
+  // Datos del alumno
+  firstName       String              // Nombre alumno
+  lastName        String?             // Apellido alumno (opcional)
+  
+  // Datos del tutor/padre
+  parentEmail     String?             // Email Padre
+  tutorFirstName  String?             // Nombre Tutor
+  tutorLastName   String?             // Apellido Tutor
+  
+  // Datos académicos
+  grade           String?             // Clase/Curso (ej: "5to grado", "2do año")
+  school          String?             // Escuela
+  
+  // Relaciones
+  bookings        Booking[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }
 
 model Teacher {
@@ -60,13 +85,14 @@ model Availability {
 model Booking {
   id        String   @id @default(uuid())
   studentId String
-  student   User     @relation(fields: [studentId], references: [id])
+  student   Student  @relation(fields: [studentId], references: [id])
   teacherId String
   teacher   Teacher  @relation(fields: [teacherId], references: [id])
   date      DateTime
   startTime String
   endTime   String
-  status    String   @default("CONFIRMED") // PENDING, CONFIRMED, CANCELLED
+  status    String   @default("PENDING") // PENDING, CONFIRMED, CANCELLED
+  confirmed Boolean  @default(false)     // Solo ADMIN puede confirmar
   
   createdAt DateTime @default(now())
 }

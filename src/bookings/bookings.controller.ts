@@ -1,8 +1,11 @@
-import { Controller, Get, Post, Body, Param, Delete, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Delete, Patch, UseGuards, Request } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
-import { CreateBookingDto } from './dto/create-booking.dto';
-import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { CreateBookingDto, UpdateBookingDto } from './dto/create-booking.dto';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
+import { Role } from '../auth/dto/auth.dto';
 
 @ApiTags('Bookings')
 @ApiBearerAuth()
@@ -19,7 +22,7 @@ export class BookingsController {
     @Get()
     @UseGuards(JwtAuthGuard)
     findAll(@Request() req: any) {
-        return this.bookingsService.findAll(req.user.sub, req.user.roles);
+        return this.bookingsService.findAll(req.user.userId, req.user.roles);
     }
 
     @Get(':id')
@@ -28,9 +31,25 @@ export class BookingsController {
         return this.bookingsService.findOne(id);
     }
 
+    @Patch(':id')
+    @UseGuards(JwtAuthGuard, RolesGuard)
+    @Roles(Role.ADMIN)
+    @ApiOperation({ summary: 'Update a booking - transfer to another teacher or change time (Admin only)' })
+    update(@Param('id') id: string, @Body() updateBookingDto: UpdateBookingDto) {
+        return this.bookingsService.update(id, updateBookingDto);
+    }
+
+    @Patch(':id/confirm')
+    @UseGuards(JwtAuthGuard, RolesGuard)
+    @Roles(Role.ADMIN)
+    @ApiOperation({ summary: 'Confirm a booking (Admin only)' })
+    confirm(@Param('id') id: string) {
+        return this.bookingsService.confirm(id);
+    }
+
     @Delete(':id')
     @UseGuards(JwtAuthGuard)
     remove(@Param('id') id: string, @Request() req: any) {
-        return this.bookingsService.remove(id, req.user.sub, req.user.roles);
+        return this.bookingsService.remove(id, req.user.userId, req.user.roles);
     }
 }

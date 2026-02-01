@@ -1,4 +1,4 @@
-import { Controller, Get, Body, Patch, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Body, Patch, Param, Delete, UseGuards } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { Role } from '../auth/dto/auth.dto';
 import { Roles } from '../auth/roles.decorator';
@@ -39,5 +39,12 @@ export class UsersController {
     })
     updateRoles(@Param('id') id: string, @Body('roles') roles: Role[]) {
         return this.usersService.updateRoles(id, roles);
+    }
+
+    @Delete(':id')
+    @Roles(Role.ADMIN)
+    @ApiOperation({ summary: 'Delete a user (Admin only)' })
+    remove(@Param('id') id: string) {
+        return this.usersService.remove(id);
     }
 }
