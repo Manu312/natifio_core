@@ -374,4 +374,354 @@ export class BookingsService {
         const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         return days[dayOfWeek];
     }
+
+    // Admin-only: Create confirmed booking directly
+    async adminAssign(adminAssignDto: any) {
+        const { teacherId, studentId: inputStudentId, subjectId, date, startTime, endTime } = adminAssignDto;
+
+        // 1. Check Teacher Exists
+        const teacher = await this.prisma.teacher.findUnique({ where: { id: teacherId } });
+        if (!teacher) throw new BadRequestException('Teacher not found');
+
+        // 2. Resolve Student - acepta studentId O userId
+        let student = await this.prisma.student.findUnique({ where: { id: inputStudentId } });
+        
+        if (!student) {
+            student = await this.prisma.student.findUnique({ where: { userId: inputStudentId } });
+        }
+        
+        if (!student) {
+            throw new BadRequestException('Student not found. Provide a valid Student ID or User ID.');
+        }
+
+        const studentId = student.id;
+
+        // 3. Validate Subject if provided
+        if (subjectId) {
+            const subject = await this.prisma.subject.findUnique({ where: { id: subjectId } });
+            if (!subject) throw new BadRequestException('Subject not found');
+        }
+
+        // 4. Validate Time Range
+        this.validateTimeRange(startTime, endTime);
+
+        // 5. Get day of week from date
+        const bookingDate = new Date(date);
+        const dayOfWeek = bookingDate.getDay();
+
+        // 6. Check if booking is within available time slots
+        const availableSlots = await this.prisma.availability.findMany({
+            where: {
+                teacherId,
+                dayOfWeek,
+            },
+        });
+
+        if (availableSlots.length === 0) {
+            throw new BadRequestException(
+                `Teacher is not available on ${this.getDayName(dayOfWeek)}s`
+            );
+        }
+
+        const isWithinAvailableSlot = availableSlots.some(slot => 
+            this.isTimeWithinRange(startTime, endTime, slot.startTime, slot.endTime)
+        );
+
+        if (!isWithinAvailableSlot) {
+            throw new BadRequestException(
+                `Booking time must be within teacher's available slots. Available: ${availableSlots.map(s => `${s.startTime}-${s.endTime}`).join(', ')}`
+            );
+        }
+
+        // 7. Check for overlapping bookings
+        const overlappingBookings = await this.prisma.booking.findMany({
+            where: {
+                teacherId,
+                date: bookingDate,
+                status: { in: ['CONFIRMED', 'PENDING'] },
+            },
+        });
+
+        const hasOverlap = overlappingBookings.some(booking => 
+            this.doTimesOverlap(startTime, endTime, booking.startTime, booking.endTime)
+        );
+
+        if (hasOverlap) {
+            throw new BadRequestException(
+                'This time slot overlaps with an existing booking'
+            );
+        }
+
+        // 8. Check Teacher Capacity for concurrent bookings
+        const concurrentBookings = await this.prisma.booking.count({
+            where: {
+                teacherId,
+                date: bookingDate,
+                startTime,
+                endTime,
+                status: { in: ['CONFIRMED', 'PENDING'] },
+            },
+        });
+
+        if (concurrentBookings >= teacher.maxCapacity) {
+            throw new BadRequestException('Teacher is fully booked for this time slot');
+        }
+
+        // 9. Create Booking as CONFIRMED (Admin privilege)
+        return this.prisma.booking.create({
+            data: {
+                teacherId,
+                studentId,
+                subjectId: subjectId || null,
+                date: bookingDate,
+                startTime,
+                endTime,
+                status: 'CONFIRMED',
+                confirmed: true,
+            },
+            include: {
+                teacher: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                    },
+                },
+                student: {
+                    include: { user: true }
+                },
+                subject: true,
+            },
+        });
+    }
+
+    // Create recurring monthly bookings
+    async createMonthly(monthlyDto: any) {
+        const { teacherId, studentId: inputStudentId, subjectId, dayOfWeek, startTime, endTime, month, year } = monthlyDto;
+
+        // 1. Validate inputs
+        const teacher = await this.prisma.teacher.findUnique({ where: { id: teacherId } });
+        if (!teacher) throw new BadRequestException('Teacher not found');
+
+        // 2. Resolve Student
+        let student = await this.prisma.student.findUnique({ where: { id: inputStudentId } });
+        if (!student) {
+            student = await this.prisma.student.findUnique({ where: { userId: inputStudentId } });
+        }
+        if (!student) {
+            throw new BadRequestException('Student not found. Provide a valid Student ID or User ID.');
+        }
+        const studentId = student.id;
+
+        // 3. Validate Subject if provided
+        if (subjectId) {
+            const subject = await this.prisma.subject.findUnique({ where: { id: subjectId } });
+            if (!subject) throw new BadRequestException('Subject not found');
+        }
+
+        // 4. Validate time range
+        this.validateTimeRange(startTime, endTime);
+
+        // 5. Get all dates in the month for the specified day of week
+        const dates = this.getDatesForDayInMonth(dayOfWeek, month, year);
+
+        if (dates.length === 0) {
+            throw new BadRequestException(`No ${this.getDayName(dayOfWeek)}s found in ${month}/${year}`);
+        }
+
+        // 6. Create RecurringGroup
+        const recurringGroup = await this.prisma.recurringGroup.create({
+            data: {
+                studentId,
+                teacherId,
+                subjectId: subjectId || null,
+                dayOfWeek,
+                startTime,
+                endTime,
+                month,
+                year,
+            },
+        });
+
+        // 7. Attempt to create bookings for each date
+        const results = {
+            recurringGroupId: recurringGroup.id,
+            totalDates: dates.length,
+            successful: [] as any[],
+            failed: [] as any[],
+        };
+
+        for (const date of dates) {
+            try {
+                // Check availability
+                const availableSlots = await this.prisma.availability.findMany({
+                    where: { teacherId, dayOfWeek },
+                });
+
+                if (availableSlots.length === 0) {
+                    results.failed.push({
+                        date: date.toISOString(),
+                        reason: `Teacher not available on ${this.getDayName(dayOfWeek)}s`,
+                    });
+                    continue;
+                }
+
+                const isWithinAvailableSlot = availableSlots.some(slot =>
+                    this.isTimeWithinRange(startTime, endTime, slot.startTime, slot.endTime)
+                );
+
+                if (!isWithinAvailableSlot) {
+                    results.failed.push({
+                        date: date.toISOString(),
+                        reason: 'Time not within available slots',
+                    });
+                    continue;
+                }
+
+                // Check for overlaps
+                const overlappingBookings = await this.prisma.booking.findMany({
+                    where: {
+                        teacherId,
+                        date,
+                        status: { in: ['CONFIRMED', 'PENDING'] },
+                    },
+                });
+
+                const hasOverlap = overlappingBookings.some(booking =>
+                    this.doTimesOverlap(startTime, endTime, booking.startTime, booking.endTime)
+                );
+
+                if (hasOverlap) {
+                    results.failed.push({
+                        date: date.toISOString(),
+                        reason: 'Time slot overlaps with existing booking',
+                    });
+                    continue;
+                }
+
+                // Check capacity
+                const concurrentBookings = await this.prisma.booking.count({
+                    where: {
+                        teacherId,
+                        date,
+                        startTime,
+                        endTime,
+                        status: { in: ['CONFIRMED', 'PENDING'] },
+                    },
+                });
+
+                if (concurrentBookings >= teacher.maxCapacity) {
+                    results.failed.push({
+                        date: date.toISOString(),
+                        reason: 'Teacher fully booked',
+                    });
+                    continue;
+                }
+
+                // Create booking
+                const booking = await this.prisma.booking.create({
+                    data: {
+                        teacherId,
+                        studentId,
+                        subjectId: subjectId || null,
+                        recurringGroupId: recurringGroup.id,
+                        date,
+                        startTime,
+                        endTime,
+                        status: 'CONFIRMED',
+                        confirmed: true,
+                    },
+                    include: {
+                        teacher: { select: { id: true, firstName: true, lastName: true } },
+                        student: { include: { user: true } },
+                        subject: true,
+                    },
+                });
+
+                results.successful.push(booking);
+            } catch (error) {
+                results.failed.push({
+                    date: date.toISOString(),
+                    reason: error.message || 'Unknown error',
+                });
+            }
+        }
+
+        return results;
+    }
+
+    // Renew a recurring group for the next month
+    async renewMonthly(groupId: string) {
+        // 1. Get the recurring group
+        const group = await this.prisma.recurringGroup.findUnique({
+            where: { id: groupId },
+        });
+
+        if (!group) {
+            throw new NotFoundException('Recurring group not found');
+        }
+
+        // 2. Calculate next month
+        let nextMonth = group.month + 1;
+        let nextYear = group.year;
+
+        if (nextMonth > 12) {
+            nextMonth = 1;
+            nextYear += 1;
+        }
+
+        // 3. Create new monthly bookings with the same config but next month
+        return this.createMonthly({
+            studentId: group.studentId,
+            teacherId: group.teacherId,
+            subjectId: group.subjectId,
+            dayOfWeek: group.dayOfWeek,
+            startTime: group.startTime,
+            endTime: group.endTime,
+            month: nextMonth,
+            year: nextYear,
+        });
+    }
+
+    // Get all recurring groups
+    async getRecurringGroups() {
+        return this.prisma.recurringGroup.findMany({
+            include: {
+                student: {
+                    include: { user: true },
+                },
+                teacher: {
+                    select: { id: true, firstName: true, lastName: true },
+                },
+                subject: true,
+                bookings: {
+                    orderBy: { date: 'asc' },
+                },
+            },
+            orderBy: { createdAt: 'desc' },
+        });
+    }
+
+    // Helper: Get all dates in a month that fall on a specific day of week
+    private getDatesForDayInMonth(dayOfWeek: number, month: number, year: number): Date[] {
+        const dates: Date[] = [];
+        const date = new Date(year, month - 1, 1); // month is 1-indexed, Date() expects 0-indexed
+
+        // Find the first occurrence of the day in the month
+        while (date.getDay() !== dayOfWeek) {
+            date.setDate(date.getDate() + 1);
+            if (date.getMonth() !== month - 1) {
+                // Day doesn't exist in this month
+                return dates;
+            }
+        }
+
+        // Collect all occurrences of the day in the month
+        while (date.getMonth() === month - 1) {
+            dates.push(new Date(date));
+            date.setDate(date.getDate() + 7);
+        }
+
+        return dates;
+    }
 }

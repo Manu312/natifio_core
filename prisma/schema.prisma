@@ -46,23 +46,25 @@ model Student {
   
   // Relaciones
   bookings        Booking[]
+  recurringGroups RecurringGroup[]
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
 
 model Teacher {
-  id          String   @id @default(uuid())
-  userId      String   @unique
-  user        User     @relation(fields: [userId], references: [id])
-  firstName   String
-  lastName    String
-  bio         String?
-  maxCapacity Int      @default(1)
+  id              String           @id @default(uuid())
+  userId          String           @unique
+  user            User             @relation(fields: [userId], references: [id])
+  firstName       String
+  lastName        String
+  bio             String?
+  maxCapacity     Int              @default(1)
   
-  subjects    Subject[]
-  availability Availability[]
-  bookings    Booking[]
+  subjects        Subject[]
+  availability    Availability[]
+  bookings        Booking[]
+  recurringGroups RecurringGroup[]
 }
 
 model Subject {
@@ -70,7 +72,9 @@ model Subject {
   name      String
   level     String
   
-  teachers  Teacher[]
+  teachers        Teacher[]
+  bookings        Booking[]
+  recurringGroups RecurringGroup[]
 }
 
 model Availability {
@@ -83,16 +87,38 @@ model Availability {
 }
 
 model Booking {
+  id               String          @id @default(uuid())
+  studentId        String
+  student          Student         @relation(fields: [studentId], references: [id])
+  teacherId        String
+  teacher          Teacher         @relation(fields: [teacherId], references: [id])
+  subjectId        String?
+  subject          Subject?        @relation(fields: [subjectId], references: [id])
+  recurringGroupId String?
+  recurringGroup   RecurringGroup? @relation(fields: [recurringGroupId], references: [id])
+  date             DateTime
+  startTime        String
+  endTime          String
+  status           String          @default("PENDING") // PENDING, CONFIRMED, CANCELLED
+  confirmed        Boolean         @default(false)     // Solo ADMIN puede confirmar
+  
+  createdAt        DateTime        @default(now())
+}
+
+model RecurringGroup {
   id        String   @id @default(uuid())
   studentId String
   student   Student  @relation(fields: [studentId], references: [id])
   teacherId String
   teacher   Teacher  @relation(fields: [teacherId], references: [id])
-  date      DateTime
-  startTime String
-  endTime   String
-  status    String   @default("PENDING") // PENDING, CONFIRMED, CANCELLED
-  confirmed Boolean  @default(false)     // Solo ADMIN puede confirmar
-  
+  subjectId String?
+  subject   Subject? @relation(fields: [subjectId], references: [id])
+  dayOfWeek Int      // 0-6 (Sunday-Saturday)
+  startTime String   // "HH:mm"
+  endTime   String   // "HH:mm"
+  month     Int      // 1-12
+  year      Int      // e.g., 2026
   createdAt DateTime @default(now())
+
+  bookings  Booking[]
 }

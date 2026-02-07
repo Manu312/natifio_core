@@ -146,8 +146,19 @@ export class StudentsService {
         }
     }
 
-    async findAll() {
+    async findAll(search?: string) {
+        const whereClause = search ? {
+            OR: [
+                { firstName: { contains: search, mode: 'insensitive' as const } },
+                { lastName: { contains: search, mode: 'insensitive' as const } },
+                { tutorFirstName: { contains: search, mode: 'insensitive' as const } },
+                { tutorLastName: { contains: search, mode: 'insensitive' as const } },
+                { user: { email: { contains: search, mode: 'insensitive' as const } } },
+            ],
+        } : {};
+
         const students = await this.prisma.student.findMany({
+            where: whereClause,
             include: {
                 user: {
                     select: {
