@@ -60,7 +60,7 @@ export class BookingsService {
             );
         }
 
-        // 5. Check for overlapping bookings
+        // 5. Check for overlapping bookings respecting teacher capacity
         const overlappingBookings = await this.prisma.booking.findMany({
             where: {
                 teacherId,
@@ -69,29 +69,23 @@ export class BookingsService {
             },
         });
 
-        const hasOverlap = overlappingBookings.some(booking => 
+        const overlapping = overlappingBookings.filter(booking =>
             this.doTimesOverlap(startTime, endTime, booking.startTime, booking.endTime)
         );
 
-        if (hasOverlap) {
+        // Prevent the same student from being booked twice at the same time
+        const studentAlreadyBooked = overlapping.some(b => b.studentId === studentId);
+        if (studentAlreadyBooked) {
             throw new BadRequestException(
-                'This time slot overlaps with an existing booking'
+                'This student already has a booking that overlaps with this time slot'
             );
         }
 
         // 6. Check Teacher Capacity for concurrent bookings
-        const concurrentBookings = await this.prisma.booking.count({
-            where: {
-                teacherId,
-                date: bookingDate,
-                startTime,
-                endTime,
-                status: { in: ['CONFIRMED', 'PENDING'] },
-            },
-        });
-
-        if (concurrentBookings >= teacher.maxCapacity) {
-            throw new BadRequestException('Teacher is fully booked for this time slot');
+        if (overlapping.length >= teacher.maxCapacity) {
+            throw new BadRequestException(
+                `Teacher is fully booked for this time slot (${overlapping.length}/${teacher.maxCapacity})`
+            );
         }
 
         // 7. Create Booking (usar studentId resuelto, no el del DTO)
@@ -433,7 +427,7 @@ export class BookingsService {
             );
         }
 
-        // 7. Check for overlapping bookings
+        // 7. Check for overlapping bookings respecting teacher capacity
         const overlappingBookings = await this.prisma.booking.findMany({
             where: {
                 teacherId,
@@ -442,29 +436,23 @@ export class BookingsService {
             },
         });
 
-        const hasOverlap = overlappingBookings.some(booking => 
+        const overlapping = overlappingBookings.filter(booking =>
             this.doTimesOverlap(startTime, endTime, booking.startTime, booking.endTime)
         );
 
-        if (hasOverlap) {
+        // Prevent the same student from being booked twice at the same time
+        const studentAlreadyBooked = overlapping.some(b => b.studentId === studentId);
+        if (studentAlreadyBooked) {
             throw new BadRequestException(
-                'This time slot overlaps with an existing booking'
+                'This student already has a booking that overlaps with this time slot'
             );
         }
 
         // 8. Check Teacher Capacity for concurrent bookings
-        const concurrentBookings = await this.prisma.booking.count({
-            where: {
-                teacherId,
-                date: bookingDate,
-                startTime,
-                endTime,
-                status: { in: ['CONFIRMED', 'PENDING'] },
-            },
-        });
-
-        if (concurrentBookings >= teacher.maxCapacity) {
-            throw new BadRequestException('Teacher is fully booked for this time slot');
+        if (overlapping.length >= teacher.maxCapacity) {
+            throw new BadRequestException(
+                `Teacher is fully booked for this time slot (${overlapping.length}/${teacher.maxCapacity})`
+            );
         }
 
         // 9. Create Booking as CONFIRMED (Admin privilege)
@@ -578,7 +566,7 @@ export class BookingsService {
                     continue;
                 }
 
-                // Check for overlaps
+                // Check for overlaps respecting capacity
                 const overlappingBookings = await this.prisma.booking.findMany({
                     where: {
                         teacherId,
@@ -587,33 +575,25 @@ export class BookingsService {
                     },
                 });
 
-                const hasOverlap = overlappingBookings.some(booking =>
+                const overlapping = overlappingBookings.filter(booking =>
                     this.doTimesOverlap(startTime, endTime, booking.startTime, booking.endTime)
                 );
 
-                if (hasOverlap) {
+                // Prevent same student double-booking
+                const studentAlreadyBooked = overlapping.some(b => b.studentId === studentId);
+                if (studentAlreadyBooked) {
                     results.failed.push({
                         date: date.toISOString(),
-                        reason: 'Time slot overlaps with existing booking',
+                        reason: 'Student already has a booking at this time',
                     });
                     continue;
                 }
 
                 // Check capacity
-                const concurrentBookings = await this.prisma.booking.count({
-                    where: {
-                        teacherId,
-                        date,
-                        startTime,
-                        endTime,
-                        status: { in: ['CONFIRMED', 'PENDING'] },
-                    },
-                });
-
-                if (concurrentBookings >= teacher.maxCapacity) {
+                if (overlapping.length >= teacher.maxCapacity) {
                     results.failed.push({
                         date: date.toISOString(),
-                        reason: 'Teacher fully booked',
+                        reason: `Teacher fully booked (${overlapping.length}/${teacher.maxCapacity})`,
                     });
                     continue;
                 }
