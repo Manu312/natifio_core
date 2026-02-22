@@ -29,22 +29,24 @@ export class AvailabilityService {
             this.validateTimeRange(slot.startTime, slot.endTime);
         }
 
-        // Create all availability slots
-        const availabilities = await this.prisma.$transaction(
-            slots.map(slot => 
-                this.prisma.availability.create({
-                    data: {
-                        teacherId,
-                        dayOfWeek: slot.dayOfWeek,
-                        startTime: slot.startTime,
-                        endTime: slot.endTime,
-                    },
-                })
-            )
-        );
+        // Create all availability slots in a single batch
+        await this.prisma.availability.createMany({
+            data: slots.map(slot => ({
+                teacherId,
+                dayOfWeek: slot.dayOfWeek,
+                startTime: slot.startTime,
+                endTime: slot.endTime,
+            })),
+        });
+
+        // Fetch created slots to return (createMany doesn't return records)
+        const availabilities = await this.prisma.availability.findMany({
+            where: { teacherId },
+            orderBy: [{ dayOfWeek: 'asc' }, { startTime: 'asc' }],
+        });
 
         return {
-            message: `Created ${availabilities.length} availability slots`,
+            message: `Created ${slots.length} availability slots`,
             availabilities,
         };
     }

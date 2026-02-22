@@ -14,6 +14,11 @@ enum Role {
   ALUMNO
 }
 
+enum Attendance {
+  PRESENT
+  ABSENT
+}
+
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
@@ -50,6 +55,8 @@ model Student {
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  @@index([firstName, lastName])
 }
 
 model Teacher {
@@ -84,6 +91,8 @@ model Availability {
   dayOfWeek Int      // 0-6 (Sunday-Saturday) or 1-7 (Monday-Sunday) - Let's use 0=Sunday
   startTime String   // "HH:mm"
   endTime   String   // "HH:mm"
+
+  @@index([teacherId, dayOfWeek])
 }
 
 model Booking {
@@ -102,7 +111,18 @@ model Booking {
   status           String          @default("PENDING") // PENDING, CONFIRMED, CANCELLED
   confirmed        Boolean         @default(false)     // Solo ADMIN puede confirmar
   
+  // Asistencia
+  attendance       Attendance?     // null = no marcada aún
+  attendanceAt     DateTime?       // Cuándo se marcó la asistencia
+  attendanceBy     String?         // userId de quién marcó (admin o profesor)
+  notes            String?         // Nota/observación sobre la clase
+  
   createdAt        DateTime        @default(now())
+
+  @@index([teacherId, date, status])
+  @@index([studentId])
+  @@index([recurringGroupId])
+  @@index([date])
 }
 
 model RecurringGroup {
@@ -121,4 +141,7 @@ model RecurringGroup {
   createdAt DateTime @default(now())
 
   bookings  Booking[]
+
+  @@index([studentId])
+  @@index([teacherId])
 }

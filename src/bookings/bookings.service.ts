@@ -2,31 +2,48 @@ import { Injectable, BadRequestException, ForbiddenException, NotFoundException 
 import { PrismaService } from '../prisma/prisma.service';
 import { Role } from '../auth/dto/auth.dto';
 import { CreateBookingDto, UpdateBookingDto } from './dto/create-booking.dto';
+import { AttendanceStatus } from './dto/mark-attendance.dto';
+
+// Shared select/include shapes to avoid over-fetching
+const TEACHER_SELECT = { id: true, firstName: true, lastName: true, userId: true } as const;
+const STUDENT_SELECT = {
+    id: true,
+    firstName: true,
+    lastName: true,
+    userId: true,
+    user: { select: { id: true, email: true } },
+} as const;
+const BOOKING_INCLUDE = {
+    teacher: { select: TEACHER_SELECT },
+    student: { select: STUDENT_SELECT },
+    subject: { select: { id: true, name: true, level: true } },
+} as const;
 
 @Injectable()
 export class BookingsService {
     constructor(private prisma: PrismaService) { }
 
-    async create(createBookingDto: CreateBookingDto) {
-        const { teacherId, studentId: inputStudentId, date, startTime, endTime } = createBookingDto;
-
-        // 1. Check Teacher Exists
-        const teacher = await this.prisma.teacher.findUnique({ where: { id: teacherId } });
-        if (!teacher) throw new BadRequestException('Teacher not found');
-
-        // 1.5. Resolve Student - acepta studentId O userId
-        let student = await this.prisma.student.findUnique({ where: { id: inputStudentId } });
-        
-        // Si no encuentra por studentId, buscar por userId
-        if (!student) {
-            student = await this.prisma.student.findUnique({ where: { userId: inputStudentId } });
-        }
-        
+    // Helper: Resolve student by studentId or userId in a single query
+    private async resolveStudent(idOrUserId: string) {
+        const student = await this.prisma.student.findFirst({
+            where: { OR: [{ id: idOrUserId }, { userId: idOrUserId }] },
+        });
         if (!student) {
             throw new BadRequestException('Student not found. Provide a valid Student ID or User ID.');
         }
+        return student;
+    }
 
-        // Usar el studentId real (de la tabla Student)
+    async create(createBookingDto: CreateBookingDto) {
+        const { teacherId, studentId: inputStudentId, date, startTime, endTime } = createBookingDto;
+
+        // 1. Resolve teacher and student in parallel
+        const [teacher, student] = await Promise.all([
+            this.prisma.teacher.findUnique({ where: { id: teacherId } }),
+            this.resolveStudent(inputStudentId),
+        ]);
+        if (!teacher) throw new BadRequestException('Teacher not found');
+
         const studentId = student.id;
 
         // 2. Validate Time Range
@@ -92,87 +109,73 @@ export class BookingsService {
         return this.prisma.booking.create({
             data: {
                 teacherId,
-                studentId, // Este es el ID real de Student (resuelto arriba)
+                studentId,
                 date: bookingDate,
                 startTime,
                 endTime,
             },
-            include: {
-                teacher: {
-                    select: {
-                        id: true,
-                        firstName: true,
-                        lastName: true,
-                    },
-                },
-                student: {
-                    include: { user: true }
-                },
-            },
+            include: BOOKING_INCLUDE,
         });
     }
 
-    async findAll(userId: string, roles: Role[]) {
-        // ADMIN ve todas las reservas
-        if (roles.includes(Role.ADMIN)) {
-            return this.prisma.booking.findMany({
-                include: { 
-                    teacher: true, 
-                    student: {
-                        include: { user: true }
-                    }
-                },
+    async findAll(
+        userId: string,
+        roles: Role[],
+        page = 1,
+        limit = 50,
+        filters?: { dateFrom?: string; dateTo?: string; teacherId?: string; status?: string },
+    ) {
+        // Build where clause with optional filters
+        const where: any = {};
+
+        if (filters?.dateFrom || filters?.dateTo) {
+            where.date = {};
+            if (filters.dateFrom) where.date.gte = new Date(filters.dateFrom);
+            if (filters.dateTo) where.date.lte = new Date(filters.dateTo);
+        }
+        if (filters?.teacherId) where.teacherId = filters.teacherId;
+        if (filters?.status) where.status = filters.status;
+
+        // Non-admin: restrict to own bookings
+        if (!roles.includes(Role.ADMIN)) {
+            const orConditions: any[] = [];
+
+            // Resolve student and teacher roles in parallel
+            const [student, teacher] = await Promise.all([
+                roles.includes(Role.ALUMNO)
+                    ? this.prisma.student.findUnique({ where: { userId } })
+                    : null,
+                roles.includes(Role.PROFESOR)
+                    ? this.prisma.teacher.findUnique({ where: { userId } })
+                    : null,
+            ]);
+
+            if (student) orConditions.push({ studentId: student.id });
+            if (teacher) orConditions.push({ teacherId: teacher.id });
+
+            if (orConditions.length === 0) return { data: [], total: 0, page, limit };
+
+            where.OR = orConditions;
+        }
+
+        const [data, total] = await Promise.all([
+            this.prisma.booking.findMany({
+                where,
+                include: BOOKING_INCLUDE,
                 orderBy: { date: 'desc' },
-            });
-        }
+                skip: (page - 1) * limit,
+                take: limit,
+            }),
+            this.prisma.booking.count({ where }),
+        ]);
 
-        // Construir filtro OR para múltiples roles
-        const orConditions: any[] = [];
-
-        // Si es ALUMNO, buscar su studentId a partir del userId
-        if (roles.includes(Role.ALUMNO)) {
-            const student = await this.prisma.student.findUnique({ where: { userId } });
-            if (student) {
-                orConditions.push({ studentId: student.id });
-            }
-        }
-
-        // Si es PROFESOR, agregar condición para ver sus reservas como profesor
-        if (roles.includes(Role.PROFESOR)) {
-            const teacher = await this.prisma.teacher.findUnique({ where: { userId } });
-            if (teacher) {
-                orConditions.push({ teacherId: teacher.id });
-            }
-        }
-
-        // Si no hay condiciones (usuario sin rol válido), retornar vacío
-        if (orConditions.length === 0) {
-            return [];
-        }
-
-        return this.prisma.booking.findMany({
-            where: {
-                OR: orConditions,
-            },
-            include: { 
-                teacher: true, 
-                student: {
-                    include: { user: true }
-                }
-            },
-            orderBy: { date: 'desc' },
-        });
+        return { data, total, page, limit };
     }
 
     findOne(id: string) {
         return this.prisma.booking.findUnique({
             where: { id },
-            include: { 
-                teacher: true, 
-                student: {
-                    include: { user: true }
-                }
-            },
+            include: BOOKING_INCLUDE,
         });
     }
 
@@ -209,10 +212,7 @@ export class BookingsService {
                 confirmed: true,
                 status: 'CONFIRMED',
             },
-            include: { 
-                teacher: true, 
-                student: { include: { user: true } }
-            },
+            include: BOOKING_INCLUDE,
         });
     }
 
@@ -314,10 +314,7 @@ export class BookingsService {
                 confirmed: false,
                 status: 'PENDING',
             },
-            include: { 
-                teacher: true, 
-                student: { include: { user: true } }
-            },
+            include: BOOKING_INCLUDE,
         });
     }
 
@@ -373,28 +370,16 @@ export class BookingsService {
     async adminAssign(adminAssignDto: any) {
         const { teacherId, studentId: inputStudentId, subjectId, date, startTime, endTime } = adminAssignDto;
 
-        // 1. Check Teacher Exists
-        const teacher = await this.prisma.teacher.findUnique({ where: { id: teacherId } });
+        // 1. Resolve teacher, student, and subject in parallel
+        const [teacher, student, subject] = await Promise.all([
+            this.prisma.teacher.findUnique({ where: { id: teacherId } }),
+            this.resolveStudent(inputStudentId),
+            subjectId ? this.prisma.subject.findUnique({ where: { id: subjectId } }) : null,
+        ]);
         if (!teacher) throw new BadRequestException('Teacher not found');
-
-        // 2. Resolve Student - acepta studentId O userId
-        let student = await this.prisma.student.findUnique({ where: { id: inputStudentId } });
-        
-        if (!student) {
-            student = await this.prisma.student.findUnique({ where: { userId: inputStudentId } });
-        }
-        
-        if (!student) {
-            throw new BadRequestException('Student not found. Provide a valid Student ID or User ID.');
-        }
+        if (subjectId && !subject) throw new BadRequestException('Subject not found');
 
         const studentId = student.id;
-
-        // 3. Validate Subject if provided
-        if (subjectId) {
-            const subject = await this.prisma.subject.findUnique({ where: { id: subjectId } });
-            if (!subject) throw new BadRequestException('Subject not found');
-        }
 
         // 4. Validate Time Range
         this.validateTimeRange(startTime, endTime);
@@ -467,71 +452,81 @@ export class BookingsService {
                 status: 'CONFIRMED',
                 confirmed: true,
             },
-            include: {
-                teacher: {
-                    select: {
-                        id: true,
-                        firstName: true,
-                        lastName: true,
-                    },
-                },
-                student: {
-                    include: { user: true }
-                },
-                subject: true,
-            },
+            include: BOOKING_INCLUDE,
         });
     }
 
-    // Create recurring monthly bookings
+    // Create recurring monthly bookings (OPTIMIZED: queries pulled out of loop)
     async createMonthly(monthlyDto: any) {
         const { teacherId, studentId: inputStudentId, subjectId, dayOfWeek, startTime, endTime, month, year } = monthlyDto;
 
-        // 1. Validate inputs
-        const teacher = await this.prisma.teacher.findUnique({ where: { id: teacherId } });
+        // 1. Resolve teacher, student, and subject in parallel
+        const [teacher, student, subject] = await Promise.all([
+            this.prisma.teacher.findUnique({ where: { id: teacherId } }),
+            this.resolveStudent(inputStudentId),
+            subjectId ? this.prisma.subject.findUnique({ where: { id: subjectId } }) : null,
+        ]);
         if (!teacher) throw new BadRequestException('Teacher not found');
-
-        // 2. Resolve Student
-        let student = await this.prisma.student.findUnique({ where: { id: inputStudentId } });
-        if (!student) {
-            student = await this.prisma.student.findUnique({ where: { userId: inputStudentId } });
-        }
-        if (!student) {
-            throw new BadRequestException('Student not found. Provide a valid Student ID or User ID.');
-        }
+        if (subjectId && !subject) throw new BadRequestException('Subject not found');
         const studentId = student.id;
 
-        // 3. Validate Subject if provided
-        if (subjectId) {
-            const subject = await this.prisma.subject.findUnique({ where: { id: subjectId } });
-            if (!subject) throw new BadRequestException('Subject not found');
-        }
-
-        // 4. Validate time range
+        // 2. Validate time range
         this.validateTimeRange(startTime, endTime);
 
-        // 5. Get all dates in the month for the specified day of week
+        // 3. Get all dates in the month for the specified day of week
         const dates = this.getDatesForDayInMonth(dayOfWeek, month, year);
-
         if (dates.length === 0) {
             throw new BadRequestException(`No ${this.getDayName(dayOfWeek)}s found in ${month}/${year}`);
         }
 
-        // 6. Create RecurringGroup
+        // 4. Fetch availability ONCE (same teacher+dayOfWeek for all dates)
+        const availableSlots = await this.prisma.availability.findMany({
+            where: { teacherId, dayOfWeek },
+        });
+
+        // 5. Pre-validate availability (applies to ALL dates identically)
+        if (availableSlots.length === 0) {
+            throw new BadRequestException(
+                `Teacher is not available on ${this.getDayName(dayOfWeek)}s`,
+            );
+        }
+        const isWithinAvailableSlot = availableSlots.some(slot =>
+            this.isTimeWithinRange(startTime, endTime, slot.startTime, slot.endTime),
+        );
+        if (!isWithinAvailableSlot) {
+            throw new BadRequestException(
+                `Booking time must be within teacher's available slots. Available: ${availableSlots.map(s => `${s.startTime}-${s.endTime}`).join(', ')}`,
+            );
+        }
+
+        // 6. Fetch ALL existing bookings for this teacher on these dates in ONE query
+        const allExistingBookings = await this.prisma.booking.findMany({
+            where: {
+                teacherId,
+                date: { in: dates },
+                status: { in: ['CONFIRMED', 'PENDING'] },
+            },
+            select: { date: true, startTime: true, endTime: true, studentId: true },
+        });
+
+        // Index existing bookings by date string for O(1) lookup
+        const bookingsByDate = new Map<string, typeof allExistingBookings>();
+        for (const b of allExistingBookings) {
+            const key = b.date.toISOString();
+            if (!bookingsByDate.has(key)) bookingsByDate.set(key, []);
+            bookingsByDate.get(key)!.push(b);
+        }
+
+        // 7. Create RecurringGroup
         const recurringGroup = await this.prisma.recurringGroup.create({
             data: {
-                studentId,
-                teacherId,
+                studentId, teacherId,
                 subjectId: subjectId || null,
-                dayOfWeek,
-                startTime,
-                endTime,
-                month,
-                year,
+                dayOfWeek, startTime, endTime, month, year,
             },
         });
 
-        // 7. Attempt to create bookings for each date
+        // 8. Validate each date in-memory, then batch-create valid bookings
         const results = {
             recurringGroupId: recurringGroup.id,
             totalDates: dates.length,
@@ -539,92 +534,44 @@ export class BookingsService {
             failed: [] as any[],
         };
 
+        const validDates: Date[] = [];
+
         for (const date of dates) {
-            try {
-                // Check availability
-                const availableSlots = await this.prisma.availability.findMany({
-                    where: { teacherId, dayOfWeek },
-                });
+            const dateKey = date.toISOString();
+            const existingForDate = bookingsByDate.get(dateKey) || [];
+            const overlapping = existingForDate.filter(b =>
+                this.doTimesOverlap(startTime, endTime, b.startTime, b.endTime),
+            );
 
-                if (availableSlots.length === 0) {
-                    results.failed.push({
-                        date: date.toISOString(),
-                        reason: `Teacher not available on ${this.getDayName(dayOfWeek)}s`,
-                    });
-                    continue;
-                }
-
-                const isWithinAvailableSlot = availableSlots.some(slot =>
-                    this.isTimeWithinRange(startTime, endTime, slot.startTime, slot.endTime)
-                );
-
-                if (!isWithinAvailableSlot) {
-                    results.failed.push({
-                        date: date.toISOString(),
-                        reason: 'Time not within available slots',
-                    });
-                    continue;
-                }
-
-                // Check for overlaps respecting capacity
-                const overlappingBookings = await this.prisma.booking.findMany({
-                    where: {
-                        teacherId,
-                        date,
-                        status: { in: ['CONFIRMED', 'PENDING'] },
-                    },
-                });
-
-                const overlapping = overlappingBookings.filter(booking =>
-                    this.doTimesOverlap(startTime, endTime, booking.startTime, booking.endTime)
-                );
-
-                // Prevent same student double-booking
-                const studentAlreadyBooked = overlapping.some(b => b.studentId === studentId);
-                if (studentAlreadyBooked) {
-                    results.failed.push({
-                        date: date.toISOString(),
-                        reason: 'Student already has a booking at this time',
-                    });
-                    continue;
-                }
-
-                // Check capacity
-                if (overlapping.length >= teacher.maxCapacity) {
-                    results.failed.push({
-                        date: date.toISOString(),
-                        reason: `Teacher fully booked (${overlapping.length}/${teacher.maxCapacity})`,
-                    });
-                    continue;
-                }
-
-                // Create booking
-                const booking = await this.prisma.booking.create({
-                    data: {
-                        teacherId,
-                        studentId,
-                        subjectId: subjectId || null,
-                        recurringGroupId: recurringGroup.id,
-                        date,
-                        startTime,
-                        endTime,
-                        status: 'CONFIRMED',
-                        confirmed: true,
-                    },
-                    include: {
-                        teacher: { select: { id: true, firstName: true, lastName: true } },
-                        student: { include: { user: true } },
-                        subject: true,
-                    },
-                });
-
-                results.successful.push(booking);
-            } catch (error) {
-                results.failed.push({
-                    date: date.toISOString(),
-                    reason: error.message || 'Unknown error',
-                });
+            if (overlapping.some(b => b.studentId === studentId)) {
+                results.failed.push({ date: dateKey, reason: 'Student already has a booking at this time' });
+                continue;
             }
+            if (overlapping.length >= teacher.maxCapacity) {
+                results.failed.push({ date: dateKey, reason: `Teacher fully booked (${overlapping.length}/${teacher.maxCapacity})` });
+                continue;
+            }
+            validDates.push(date);
+        }
+
+        // 9. Batch-create all valid bookings in a single transaction
+        if (validDates.length > 0) {
+            const createdBookings = await this.prisma.$transaction(
+                validDates.map(date =>
+                    this.prisma.booking.create({
+                        data: {
+                            teacherId, studentId,
+                            subjectId: subjectId || null,
+                            recurringGroupId: recurringGroup.id,
+                            date, startTime, endTime,
+                            status: 'CONFIRMED',
+                            confirmed: true,
+                        },
+                        include: BOOKING_INCLUDE,
+                    }),
+                ),
+            );
+            results.successful.push(...createdBookings);
         }
 
         return results;
@@ -663,19 +610,48 @@ export class BookingsService {
         });
     }
 
+    // Mark student attendance (ADMIN or assigned PROFESOR)
+    async markAttendance(bookingId: string, attendance: AttendanceStatus, userId: string, roles: Role[], notes?: string) {
+        const booking = await this.prisma.booking.findUnique({
+            where: { id: bookingId },
+            include: { teacher: { select: { userId: true } } },
+        });
+        if (!booking) throw new NotFoundException('Booking not found');
+
+        // Permission check: ADMIN always can, PROFESOR only if assigned to this booking
+        const isAdmin = roles.includes(Role.ADMIN);
+        const isTeacherOfBooking = roles.includes(Role.PROFESOR) && booking.teacher.userId === userId;
+
+        if (!isAdmin && !isTeacherOfBooking) {
+            throw new ForbiddenException('Only the assigned teacher or an admin can mark attendance');
+        }
+
+        if (booking.status !== 'CONFIRMED') {
+            throw new BadRequestException('Can only mark attendance on confirmed bookings');
+        }
+
+        return this.prisma.booking.update({
+            where: { id: bookingId },
+            data: {
+                attendance,
+                attendanceAt: new Date(),
+                attendanceBy: userId,
+                ...(notes !== undefined && { notes }),
+            },
+            include: BOOKING_INCLUDE,
+        });
+    }
+
     // Get all recurring groups
     async getRecurringGroups() {
         return this.prisma.recurringGroup.findMany({
             include: {
-                student: {
-                    include: { user: true },
-                },
-                teacher: {
-                    select: { id: true, firstName: true, lastName: true },
-                },
-                subject: true,
+                student: { select: STUDENT_SELECT },
+                teacher: { select: TEACHER_SELECT },
+                subject: { select: { id: true, name: true, level: true } },
                 bookings: {
                     orderBy: { date: 'asc' },
+                    select: { id: true, date: true, startTime: true, endTime: true, status: true, attendance: true },
                 },
             },
             orderBy: { createdAt: 'desc' },

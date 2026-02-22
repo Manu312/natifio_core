@@ -317,9 +317,14 @@ export class StudentsService {
 
         // Delete in transaction (Student first, then User)
         await this.prisma.$transaction(async (tx) => {
-            // Delete bookings first
+            // Delete bookings first (use student.id, not student.userId)
             await tx.booking.deleteMany({
-                where: { studentId: student.userId },
+                where: { studentId: student.id },
+            });
+
+            // Delete recurring groups
+            await tx.recurringGroup.deleteMany({
+                where: { studentId: student.id },
             });
 
             // Delete Student profile
